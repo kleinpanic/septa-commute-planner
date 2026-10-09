@@ -81,7 +81,7 @@ function harness(options={}){
  const sandbox={process:{env:process.env},Date:Clock,console:{log:v=>logs.push(v),error:v=>logs.push(v)},
   PropertiesService:{getScriptProperties:()=>props},SpreadsheetApp:{getActiveSpreadsheet:()=>book,openById:id=>{if(id!==book.getId())throw new Error('mock_wrong_sheet');return book;},getUi:()=>ui},
   CalendarApp:{createCalendar(name){const id='created-'+createdCalendars.length;createdCalendars.push({name,id});resources.set(id,[]);return {getId:()=>id};}},
-  ScriptApp:{getScriptId:()=> 'fixture-script',getOAuthToken:()=> 'fixture-token',getProjectTriggers:()=>triggers.slice(),deleteTrigger:t=>triggers.splice(triggers.indexOf(t),1),newTrigger(handler){const t={getHandlerFunction:()=>handler};return {timeBased(){return this;},everyMinutes(n){t.minutes=n;return this;},create(){triggers.push(t);return t;}};}},
+  ScriptApp:{getScriptId:()=> 'fixture-script',getOAuthToken:()=> 'fixture-token',getProjectTriggers:()=>triggers.slice(),deleteTrigger:t=>triggers.splice(triggers.indexOf(t),1),newTrigger(handler){const t={getHandlerFunction:()=>handler};return {timeBased(){return this;},everyMinutes(n){t.minutes=n;return this;},everyHours(n){t.hours=n;return this;},create(){triggers.push(t);return t;}};}},
   LockService:{getScriptLock:()=>({tryLock:()=>{if(busy||locked)return false;locked=true;return true;},releaseLock:()=>{locked=false;}})},
   UrlFetchApp:{fetch,fetchAll:ops=>ops.map(o=>fetch(o.url,o))},
   Utilities:{sleep:n=>sleeps.push(n),formatDate:fmt,parseDate,parseCsv:JSON.parse,unzip:b=>b.kind==='outer'?[{kind:'rail',getName:()=> 'google_rail.zip'}]:archive(),computeDigest:(alg,s)=>[...crypto.createHash('sha256').update(s).digest()],DigestAlgorithm:{SHA_256:'sha256'},Charset:{UTF_8:'UTF-8'}},

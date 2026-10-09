@@ -12,8 +12,10 @@ const SETTING_ROWS = [
   ['options_calendar_id','', 'Separate train-options calendar created during setup.'],
   ['planning_days',7,'Rolling window, 1–21 days, limited to feed coverage. Increase only after checking daily provider budgets.'],
   ['options_per_station',3,'Train choices per station/direction/day, 1–6.'],
-  ['refresh_minutes',15,'Automatic trigger cadence: 5, 10, 15 or 30 minutes.'],
-  ['full_refresh_hours',6,'Recompute the forward window; today refreshes more often.'],
+  ['refresh_minutes',60,'Hourly by default. Supported minutes: 5, 10, 15, 30, 60, 120, 240, 360, 480, 720. Run setup after changing.'],
+  ['full_refresh_hours',24,'Rebuild the forward window daily during waking hours. Refresh now bypasses this wait.'],
+  ['active_window_hours',4,'Refresh today only within this many hours before first or after last commitment.'],
+  ['max_scheduled_runtime_seconds_per_day',1200,'Stop expensive scheduled work after 20 minutes/day. Other scripts share Google quotas. Refresh now remains available.'],
   ['arrival_buffer_minutes',15,'Arrive this far before the first commitment.'],
   ['parking_buffer_minutes',10,'Parking, boarding and recovery time at the origin station.'],
   ['departure_buffer_minutes',5,'Time after the final commitment before walking to the station.'],
@@ -24,9 +26,9 @@ const SETTING_ROWS = [
   ['quiet_start_hour',6,'Skip expensive today refresh outside this hour through quiet_end_hour.'],
   ['quiet_end_hour',22,'Local New York hour. Full refresh still runs when due.'],
   ['max_deletions_per_run',20,'Fail closed if reconciliation proposes excessive managed deletions.']
-  ,['max_maps_requests_per_day',800,'Daily cap for built-in Google Maps requests; remaining capacity is kept for manual use.']
-  ,['max_routes_requests_per_day',1200,'Daily cap for traffic-aware Routes API calls; provider billing/quota still applies.']
-  ,['routes_api_enabled',true,'Use a privately configured Routes API key. Disable to use built-in Google Maps only.']
+  ,['max_maps_requests_per_day',100,'Daily cap for built-in Google Maps requests; the free profile normally needs far fewer.']
+  ,['max_routes_requests_per_day',0,'Paid Routes API is off by default. Set a positive budget only if opting in; billing/quota applies.']
+  ,['routes_api_enabled',false,'Free profile uses built-in Google Maps without a key. Opt in to departure-specific traffic predictions only when wanted.']
 ];
 
 function onOpen() {
@@ -54,10 +56,10 @@ function settings_() {
   const rows=sheet_('Settings').getDataRange().getValues();const c={};
   rows.slice(1).forEach(r=>{if(r[0])c[String(r[0])]=r[1];});
   SETTING_ROWS.forEach(r=>{if(!(r[0] in c))c[r[0]]=r[1];});
-  ['planning_days','options_per_station','refresh_minutes','full_refresh_hours','arrival_buffer_minutes','parking_buffer_minutes','departure_buffer_minutes','fallback_walk_minutes','quiet_start_hour','quiet_end_hour','max_deletions_per_run','max_maps_requests_per_day','max_routes_requests_per_day'].forEach(k=>{
+  ['planning_days','options_per_station','refresh_minutes','full_refresh_hours','active_window_hours','max_scheduled_runtime_seconds_per_day','arrival_buffer_minutes','parking_buffer_minutes','departure_buffer_minutes','fallback_walk_minutes','quiet_start_hour','quiet_end_hour','max_deletions_per_run','max_maps_requests_per_day','max_routes_requests_per_day'].forEach(k=>{
     c[k]=Number(c[k]);if(!Number.isFinite(c[k])||c[k]<0||!Number.isInteger(c[k]))throw new Error('setting_invalid:'+k);
   });
-  if(c.planning_days<1||c.planning_days>21||c.options_per_station<1||c.options_per_station>6||![5,10,15,30].includes(c.refresh_minutes)||c.full_refresh_hours<1||c.quiet_start_hour>23||c.quiet_end_hour>24)throw new Error('setting_bounds_invalid');
+  if(c.planning_days<1||c.planning_days>21||c.options_per_station<1||c.options_per_station>6||![5,10,15,30,60,120,240,360,480,720].includes(c.refresh_minutes)||c.full_refresh_hours<1||c.active_window_hours<1||c.active_window_hours>12||c.max_scheduled_runtime_seconds_per_day<60||c.quiet_start_hour>23||c.quiet_end_hour>24||c.quiet_start_hour>=c.quiet_end_hour)throw new Error('setting_bounds_invalid');
   ['automatic_enabled','main_writer_enabled','routes_api_enabled'].forEach(k=>c[k]=c[k]===true || String(c[k]).toLowerCase()==='true');
   ['source_calendar_ids','optional_calendar_ids','campus_location_terms','reminder_minutes'].forEach(k=>c[k]=String(c[k]||'').split(';').map(s=>s.trim()).filter(Boolean));
   c.reminder_minutes=c.reminder_minutes.map(Number);
@@ -73,7 +75,9 @@ function setting_(key,value) {
 function status_(values) {
   const s=sheet_('Status');const rows=s.getDataRange().getValues();
   const old=Object.fromEntries(rows.slice(1).filter(r=>r[0]).map(r=>[r[0],r[1]]));
-  table_('Status',[['Measure','Value'],...Object.entries(Object.assign(old,values))]);
+  const merged=[['Measure','Value'],...Object.entries(Object.assign(old,values))];
+  if(s.getLastRow()<1)table_('Status',merged);
+  else s.getRange(1,1,merged.length,2).setValues(merged);
 }
 function initializeSheet_() {
   const p=PropertiesService.getScriptProperties(),b=SpreadsheetApp.getActiveSpreadsheet();
@@ -96,7 +100,7 @@ function initializeSheet_() {
     ['4. Choose','Copy an Option ID to Selections for a date and outbound/return direction. Blank selects the recommendation.'],
     ['5. Main journey','Enable main_writer_enabled after a successful staged run and retiring any old writer.'],
     ['Calendars','SEPTA Train Options shows alternatives; the main calendar shows only the chosen journey.'],
-    ['Automatic work','The Google trigger refreshes today and periodically rebuilds the forward window. Status records actual success.'],
+    ['Automatic work','Free profile: hourly checks, daily forward planning, expensive work only around commutes. Status shows runtime and request counts.'],
     ['Traffic','Set a Routes API key for explicit traffic-aware road predictions; Maps still supplies route distance/time without it.'],
     ['Freshness','Scheduled trains are not live predictions. Unmatched, unavailable and stale live information are labeled.'],
     ['Privacy','Keep the Sheet private. Origin and calendar IDs are personal. Keys are stored in Script Properties.'],
@@ -111,9 +115,11 @@ function setupCommute() {
     status_({state:'SETUP REQUIRED',detail:'Fill origin and source_calendar_ids, then run setup again.'});return;
   }
   ScriptApp.getProjectTriggers().filter(t=>t.getHandlerFunction()==='commuteTick').forEach(t=>ScriptApp.deleteTrigger(t));
-  ScriptApp.newTrigger('commuteTick').timeBased().everyMinutes(c.refresh_minutes).create();
+  const trigger=ScriptApp.newTrigger('commuteTick').timeBased();
+  if(c.refresh_minutes>=60)trigger.everyHours(c.refresh_minutes/60);else trigger.everyMinutes(c.refresh_minutes);
+  trigger.create();
   setting_('automatic_enabled',true);
-  status_({trigger_installed_at:new Date().toISOString(),trigger_count:ScriptApp.getProjectTriggers().filter(t=>t.getHandlerFunction()==='commuteTick').length});
+  status_({trigger_installed_at:new Date().toISOString(),installed_refresh_minutes:c.refresh_minutes,trigger_count:ScriptApp.getProjectTriggers().filter(t=>t.getHandlerFunction()==='commuteTick').length});
   return runCommute_('setup',true);
 }
 function commuteTick() { return runCommute_('scheduled',false); }

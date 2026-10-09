@@ -51,7 +51,7 @@ test('full workflow offers multiple trains, writes alternatives separately, and 
  const h=host();h.properties.set('ROUTES_KEY','fixture-key');const source=clone(h.resources.get('source'));const r=h.ctx.refreshCommute();
  assert.equal(r.state,'healthy');assert.equal(r.options,12);assert.equal(r.main,0);assert.equal(h.resources.get('main').length,0);assert.deepEqual(h.resources.get('source'),source);
  const rows=h.sheets.get('Train options').rows.slice(1);assert.equal(rows.length,12);assert.equal(rows.filter(r=>r[13]==='CHOSEN').length,2);assert.equal(rows[0][9],10);
- assert.ok(rows.every(r=>r[11].includes('unknown')));assert.ok(h.resources.get('options').every(e=>e.reminders.overrides.length===0));
+ assert.ok(rows.every(r=>/unknown|stale/i.test(r[11])));assert.ok(h.resources.get('options').every(e=>e.reminders.overrides.length===0));
 });
 test('main journey contains only paired chosen trains with explicit popup reminders',()=>{
  const h=host();h.ctx.setting_('main_writer_enabled',true);h.ctx.refreshCommute();const events=h.resources.get('main');assert.equal(events.length,2);
@@ -98,7 +98,7 @@ test('provider budget enforces a daily cap and fallback reports missing Google e
  assert.ok(h.sheets.get('Train options').rows.slice(1).some(r=>r[9]==='Unknown'));
 });
 test('traffic API failure retains a Google Maps route and road distance with explicit provenance',()=>{
- const h=host();h.properties.set('ROUTES_KEY','fixture-key');h.failures.set('https://routes.googleapis.com/directions/v2:computeRoutes',403);assert.equal(h.ctx.refreshCommute().state,'degraded');
+ const h=host();h.ctx.setting_('routes_api_enabled',true);h.ctx.setting_('max_routes_requests_per_day',10);h.properties.set('ROUTES_KEY','fixture-key');h.failures.set('https://routes.googleapis.com/directions/v2:computeRoutes',403);assert.equal(h.ctx.refreshCommute().state,'degraded');
  assert.match(h.status().detail,/google_routes_http_403/);assert.ok(h.sheets.get('Train options').rows.slice(1).every(r=>r[9]===10));assert.ok(h.sheets.get('Train options').rows.slice(1).every(r=>r[10].includes('traffic not supplied')));
 });
 test('configuration changes automatically refresh future days at the next scheduled execution',()=>{

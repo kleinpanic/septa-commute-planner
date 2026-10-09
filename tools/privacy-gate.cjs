@@ -3,7 +3,7 @@ const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypt
 const PUBLIC_FILES=[
  'Core.gs','Planner.gs','Setup.gs','appsscript.json','README.md','TESTING.md','LICENSE',
  'package.json','package-lock.json','stryker.config.json','.gitignore','.github/workflows/test.yml',
- 'test/core.test.cjs','test/product.test.cjs','test/boundaries.test.cjs','test/privacy.test.cjs','test/verifier.test.cjs','test/harness.cjs','test/source.cjs',
+ 'test/core.test.cjs','test/product.test.cjs','test/boundaries.test.cjs','test/free-profile.test.cjs','test/privacy.test.cjs','test/verifier.test.cjs','test/harness.cjs','test/source.cjs',
  'tools/upload.cjs','tools/verify-live.cjs','tools/prepare-mutation.cjs','tools/privacy-gate.cjs','tools/publish-github.cjs'
 ];
 function audit(root=path.resolve(__dirname,'..')){

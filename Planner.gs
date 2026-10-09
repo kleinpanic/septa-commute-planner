@@ -3,11 +3,13 @@ let walkMemo_={};
 let providerBudget_={};
 let routesUnavailable_=false;
 let driveMemo_={};
+let providerUsage_={maps:0,routes:0};
 function budget_(provider,warnings) {
   const p=PropertiesService.getScriptProperties(),key='USAGE_'+provider+'_'+localDate_(new Date());
   const n=Number(p.getProperty(key) || 0);
   if(n>=providerBudget_[provider]) { warnings.add(provider+'_daily_budget_reached');throw new Error('google_daily_budget_reached'); }
   p.setProperty(key,String(n+1));
+  providerUsage_[provider]++;
 }
 function localDate_(d) { return Utilities.formatDate(d,TZ_,'yyyy-MM-dd'); }
 function localTime_(d) { return Utilities.formatDate(d,TZ_,'HH:mm'); }
@@ -116,7 +118,7 @@ function walk_(station,place,c,warnings) {
     return walkMemo_[memo]={seconds:leg.duration.value,meters:leg.distance.value,label:'Google walking route'};
   }catch(e){warnings.add('google_walk_fallback');return {seconds:c.fallback_walk_minutes*60,meters:null,label:'Configured walk fallback · Google unavailable'};}
 }
-function drive_(origin,station,departure,returning,fallback,warnings,routesEnabled=true) {
+function drive_(origin,station,departure,returning,fallback,warnings,routesEnabled=false) {
   const point=station.stop_lat+','+station.stop_lon;
   const from=returning?point:String(origin),to=returning?String(origin):point;
   const memo=from+'>'+to;
@@ -139,22 +141,25 @@ function drive_(origin,station,departure,returning,fallback,warnings,routesEnabl
   if(driveMemo_[memo])return driveMemo_[memo];
   try {
     budget_('maps',warnings);
-    const r=Maps.newDirectionFinder().setOrigin(from).setDestination(to).setMode(Maps.DirectionFinder.Mode.DRIVING)
-      .setDepart(new Date(Math.max(departure,Date.now()+60000))).getDirections();
+    const finder=Maps.newDirectionFinder().setOrigin(from).setDestination(to).setMode(Maps.DirectionFinder.Mode.DRIVING);
+    if(routesEnabled)finder.setDepart(new Date(Math.max(departure,Date.now()+60000)));
+    const r=finder.getDirections();
     const leg=r.routes&&r.routes[0]&&r.routes[0].legs[0];if(!leg)throw new Error('google_route_missing');
-    if(!Number.isFinite((leg.duration_in_traffic||leg.duration).value)||(leg.duration_in_traffic||leg.duration).value<=0||!Number.isFinite(leg.distance.value)||leg.distance.value<=0)throw new Error('google_route_invalid');
-    const result={seconds:(leg.duration_in_traffic || leg.duration).value,meters:leg.distance.value,
-      label:leg.duration_in_traffic?'Google traffic forecast':'Google route estimate · traffic not supplied',observed:new Date().toISOString()};
-    if(!leg.duration_in_traffic)driveMemo_[memo]=result;
+    const traffic=routesEnabled&&leg.duration_in_traffic,duration=traffic||leg.duration;
+    if(!Number.isFinite(duration.value)||duration.value<=0||!Number.isFinite(leg.distance.value)||leg.distance.value<=0)throw new Error('google_route_invalid');
+    const result={seconds:duration.value,meters:leg.distance.value,
+      label:traffic?'Google traffic forecast':'Google Maps route estimate · traffic not supplied',observed:new Date().toISOString()};
+    if(!traffic)driveMemo_[memo]=result;
     return result;
   }catch(e){warnings.add('google_drive_unavailable');return {seconds:fallback,meters:null,label:'Configured drive fallback · Google unavailable',observed:null};}
 }
 function live_(stations,target,warnings) {
-  const result={trains:[],arrivals:{},observedAt:0};
+  const result={trains:[],arrivals:{},observedAt:0,requests:1};
   try{result.trains=fetchJson_('https://api.septa.org/api/TrainView/index.php',{},'septa_trainview');
     if(!Array.isArray(result.trains))throw new Error('septa_trainview_invalid');
   }catch(e){warnings.add('trainview_unavailable');result.trains=[];}
   stations.map(s=>s.id).concat([String(target)]).forEach(id=>{
+    result.requests++;
     try{result.arrivals[id]=CommuteCore.flattenArrivals(fetchJson_('https://api.septa.org/api/Arrivals/index.php?req1='+encodeURIComponent(id)+'&req2=6',{},'septa_arrivals'));}
     catch(e){warnings.add('station_arrivals_unavailable');result.arrivals[id]=[];}
   });result.observedAt=Date.now();return result;
@@ -290,7 +295,7 @@ function runCommute_(kind,force) {
   const started=Date.now(),p=PropertiesService.getScriptProperties(),warnings=new Set();let stage='configuration';
   try {
     const c=settings_();
-    walkMemo_={};driveMemo_={};routesUnavailable_=false;providerBudget_={maps:c.max_maps_requests_per_day,routes:c.max_routes_requests_per_day};
+    walkMemo_={};driveMemo_={};routesUnavailable_=false;providerUsage_={maps:0,routes:0};providerBudget_={maps:c.max_maps_requests_per_day,routes:c.max_routes_requests_per_day};
     status_({last_attempt_at:new Date(started).toISOString(),last_attempt_kind:kind});
     if(!c.automatic_enabled&&kind==='scheduled')return {state:'paused'};
     if(!c.origin||!c.source_calendar_ids.length||!c.options_calendar_id)throw new Error('setup_incomplete');
@@ -298,14 +303,23 @@ function runCommute_(kind,force) {
     if(c.options_calendar_id===c.main_calendar_id||sources.includes(c.options_calendar_id)||(c.main_writer_enabled&&(!c.main_calendar_id||sources.includes(c.main_calendar_id))))throw new Error('calendar_roles_conflict');
     const today=localDate_(new Date(started)),lastFull=Number(p.getProperty('LAST_FULL') || 0);
     const signature=hash_(JSON.stringify({settings:c,stations:sheet_('Stations').getDataRange().getValues(),selections:sheet_('Selections').getDataRange().getValues()}));
-    const full=force||p.getProperty('LAST_CONFIG')!==signature||started-lastFull>=c.full_refresh_hours*3600000;
     const hour=Number(Utilities.formatDate(new Date(started),TZ_,'H'));
+    const quiet=hour<c.quiet_start_hour||hour>=c.quiet_end_hour;
+    const due=started-lastFull>=c.full_refresh_hours*3600000||localDate_(new Date(lastFull))!==today;
+    const full=force||p.getProperty('LAST_CONFIG')!==signature||(due&&!quiet);
+    if(kind==='scheduled'&&Number(p.getProperty('RUNTIME_'+today)||0)>=c.max_scheduled_runtime_seconds_per_day) {
+      status_({heartbeat_at:new Date().toISOString(),state:'IDLE · daily runtime budget',detail:'Scheduled runtime budget reached; prior output retained. Refresh now is available.'});return {state:'idle'};
+    }
     if(!full&&(hour<c.quiet_start_hour||hour>=c.quiet_end_hour)) {status_({heartbeat_at:new Date().toISOString(),state:'IDLE · quiet hours'});return {state:'idle'};}
     const start=epoch_(today,0),end=epoch_(CommuteCore.addDays(today,full?c.planning_days:1),0);
-    const stations=stations_();stage='static_schedule';const feed=feed_(c,stations,started);
     stage='source_calendars';const days=commitments_(c,start,end,warnings);
+    const publishedToday=sheet_('Days').getDataRange().getValues().slice(1).some(r=>String(r[0])===today);
+    if(!full&&((!days.length&&!publishedToday)||(days.length&&!days.some(d=>started>=d.start-c.active_window_hours*3600000&&started<=d.end+c.active_window_hours*3600000)))) {
+      status_({heartbeat_at:new Date().toISOString(),state:'IDLE · outside commute window',detail:'Source calendars checked; expensive rail and Google routing work skipped.'});return {state:'idle'};
+    }
+    const stations=stations_();stage='static_schedule';const feed=days.length?feed_(c,stations,started):{version:'No commute days',start:'',end:'',checked:new Date().toISOString()};
     if(days.some(d=>d.date.replace(/-/g,'')<feed.start||d.date.replace(/-/g,'')>feed.end))throw new Error('gtfs_window_outside_coverage');
-    stage='live_rail';const live=live_(stations,c.target_stop_id,warnings);
+    stage='live_rail';const live=days.some(d=>d.date===today&&started>=d.start-c.active_window_hours*3600000&&started<=d.end+c.active_window_hours*3600000)?live_(stations,c.target_stop_id,warnings):{trains:[],arrivals:{},observedAt:0,requests:0};
     stage='google_routes_and_choices';const selections=selections_();
     const plans=days.map(d=>planDay_(d,c,stations,feed,live,started,warnings,selections));
     const owner='septa-commute:'+ScriptApp.getScriptId();
@@ -325,11 +339,20 @@ function runCommute_(kind,force) {
       feed_version:feed.version,feed_coverage:feed.start+' → '+feed.end,feed_checked_at:feed.checked,
       planned_days:plans.length,options_in_run:optionEvents.length,main_events_in_run:mainResult.events,
       calendar_changes:optionsResult.changes+mainResult.changes,main_writer_enabled:c.main_writer_enabled,
+      maps_requests_in_run:providerUsage_.maps,routes_requests_in_run:providerUsage_.routes,septa_live_requests_in_run:live.requests,
       runtime_seconds:Math.round((Date.now()-started)/1000),last_error_stage:'',last_error_code:'',
       trigger_count:ScriptApp.getProjectTriggers().filter(t=>t.getHandlerFunction()==='commuteTick').length});
     const result={state:warnings.size?'degraded':'healthy',kind,days:plans.length,options:optionEvents.length,main:mainResult.events};console.log(JSON.stringify(result));return result;
   }catch(e) {
     const code=safeCode_(e);status_({state:'FAILED',detail:'Failed at '+stage+': '+code,last_error_stage:stage,last_error_code:code,heartbeat_at:new Date().toISOString(),runtime_seconds:Math.round((Date.now()-started)/1000)});
     console.error(JSON.stringify({state:'failed',kind,stage,code}));throw new Error(stage+':'+code);
-  }finally{lock.releaseLock();}
+  }finally{
+    try {
+      const today=localDate_(new Date(started)),seconds=Math.max(0,Math.ceil((Date.now()-started)/1000));
+      if(kind==='scheduled')p.setProperty('RUNTIME_'+today,String(Number(p.getProperty('RUNTIME_'+today)||0)+seconds));
+      status_({runtime_seconds:seconds,scheduled_runtime_seconds_today:Number(p.getProperty('RUNTIME_'+today)||0),maps_requests_today:Number(p.getProperty('USAGE_maps_'+today)||0),routes_requests_today:Number(p.getProperty('USAGE_routes_'+today)||0)});
+      const cutoff=CommuteCore.addDays(today,-7);
+      Object.keys(p.getProperties()).forEach(k=>{const match=/^(?:USAGE_(?:maps|routes)_|RUNTIME_|OUTBOUND_LEAVE_|OUTBOUND_)(\d{4}-\d{2}-\d{2})$/.exec(k);if(match&&match[1]<cutoff)p.deleteProperty(k);});
+    }finally{lock.releaseLock();}
+  }
 }
