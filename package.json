@@ -1,0 +1,14 @@
+{
+  "name": "septa-commute-planner",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Configurable Google-hosted SEPTA Regional Rail commute planner",
+  "engines": {"node": ">=22"},
+  "scripts": {
+    "test": "node --test test/*.test.cjs",
+    "test:coverage": "node --test --experimental-test-coverage --test-coverage-include='**/*.gs' --test-coverage-lines=99 --test-coverage-branches=90 --test-coverage-functions=95 test/*.test.cjs",
+    "test:privacy": "node tools/privacy-gate.cjs",
+    "test:mutation": "node tools/prepare-mutation.cjs && stryker run"
+  },
+  "devDependencies": {"@stryker-mutator/core": "10.0.0"}
+}

@@ -1,0 +1,7 @@
+node_modules/
+reports/
+.mutation-src/
+.stryker-tmp/
+.env*
+.clasp.json
+credentials*.json
