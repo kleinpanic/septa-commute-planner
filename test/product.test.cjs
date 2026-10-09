@@ -19,6 +19,30 @@ test('calendar permission failures do not retry; missing deletes are idempotent;
  }
 });
 function host(){const h=harness();h.configure();return h;}
+test('re-expanded horizons recreate deleted Calendar IDs and remain idempotent by logical ownership key',()=>{
+ const h=host(),next=clone(h.resources.get('source')[0]);next.start.dateTime='2026-10-12T13:20:00-04:00';next.end.dateTime='2026-10-12T15:50:00-04:00';h.resources.get('source').push(next);h.ctx.setting_('planning_days',7);h.ctx.refreshCommute();
+ const previous=new Set(h.resources.get('options').filter(e=>e.extendedProperties.private.commuteKey.startsWith('2026-10-12')).map(e=>e.id));
+ for(let cycle=0;cycle<5;cycle++){h.ctx.setting_('planning_days',1);h.ctx.refreshCommute();assert.equal(h.resources.get('options').length,12);h.ctx.setting_('planning_days',7);h.ctx.refreshCommute();assert.equal(h.resources.get('options').length,24);const keys=h.resources.get('options').map(e=>e.extendedProperties.private.commuteKey);assert.equal(new Set(keys).size,24);const n=h.writes.length;h.ctx.refreshCommute();assert.equal(h.writes.length,n);}
+ const recreated=h.resources.get('options').find(e=>e.extendedProperties.private.commuteKey.startsWith('2026-10-12'));assert.ok(!previous.has(recreated.id));const id=recreated.id;h.ctx.setting_('reminder_minutes','20');h.ctx.refreshCommute();assert.ok(h.resources.get('options').some(e=>e.id===id));
+});
+test('insert conflicts recognize a prior successful write; foreign and deleted records are never patched',()=>{
+ const body={id:'reserved',extendedProperties:{private:{commuteOwner:'owner',commuteKey:'journey',commuteHash:'digest'}}};
+ for(const existing of [clone(body),{...clone(body),extendedProperties:{private:{commuteOwner:'owner',commuteKey:'journey',commuteHash:'old'}}},{...clone(body),extendedProperties:{private:{commuteOwner:'someone-else',commuteKey:'journey'}}},{id:'reserved',status:'cancelled'},null]){
+  const h=host();let calls=0;h.ctx.UrlFetchApp.fetchAll=ops=>{calls++;return ops.map(()=>({getResponseCode:()=>calls===1?409:200,getContentText:()=> '{}'}));};h.ctx.UrlFetchApp.fetch=(url,opt)=>{assert.equal(url,'one/reserved');assert.equal(opt.headers.Authorization,'Bearer fixture-token');return {getResponseCode:()=>existing?200:410,getContentText:()=>JSON.stringify(existing)};};
+  const next=h.ctx.conflictingInsert_({url:'one',method:'post',body},'fixture-token');
+  if(existing?.extendedProperties?.private.commuteHash==='digest'&&existing.extendedProperties.private.commuteOwner==='owner')assert.equal(next,null);
+  else if(existing?.extendedProperties?.private.commuteOwner==='owner'){assert.equal(next.method,'patch');assert.equal(next.url,'one/reserved');assert.equal(next.body.id,undefined);}
+  else {assert.equal(next.method,'post');assert.notEqual(next.body.id,'reserved');assert.match(next.body.id,/^[a-f0-9]{40}$/);assert.equal(next.body.extendedProperties.private.commuteOwner,'owner');}
+  h.ctx.calendarBatch_([{url:'one',method:'post',body}],'fixture-token');assert.equal(calls,next?2:1);
+ }
+});
+test('conflict lookup errors and repeated conflicts stop safely; duplicate owned logical keys fail before writes',()=>{
+ const h=host(),body={id:'x',extendedProperties:{private:{commuteOwner:'owner',commuteKey:'key'}}};
+ for(const code of [403,500]){h.ctx.UrlFetchApp.fetch=()=>({getResponseCode:()=>code,getContentText:()=> '{}'});assert.throws(()=>h.ctx.conflictingInsert_({url:'one',body},'token'),new RegExp('calendar_get_http_'+code));}
+ h.ctx.UrlFetchApp.fetch=()=>({getResponseCode:()=>200,getContentText:()=> 'broken'});assert.throws(()=>h.ctx.conflictingInsert_({url:'one',body},'token'),/calendar_get_json_invalid/);
+ h.ctx.UrlFetchApp.fetch=()=>({getResponseCode:()=>404,getContentText:()=> '{}'});let calls=0;h.ctx.UrlFetchApp.fetchAll=ops=>{calls++;return ops.map(()=>({getResponseCode:()=>409,getContentText:()=> '{}'}));};assert.throws(()=>h.ctx.calendarBatch_([{url:'one',method:'post',body}],'token'),/calendar_post_http_409/);assert.equal(calls,4);
+ const duplicate=host();duplicate.ctx.refreshCommute();const old=duplicate.resources.get('options')[0];duplicate.resources.get('options').push({...clone(old),id:'second'});const n=duplicate.writes.length;assert.throws(()=>duplicate.ctx.refreshCommute(),/calendar_duplicate_owned_key/);assert.equal(duplicate.writes.length,n);
+});
 test('fresh initialization creates usable configuration and preserves selections on reinitialization',()=>{
  const h=harness();h.ctx.initializeSheet_();assert.equal(h.sheets.get('Settings').rows[0][0],'Setting');assert.equal(h.properties.get('SHEET_ID'),'fixture-sheet');
  h.ctx.setting_('origin','Saved private origin');h.sheets.get('Selections').appendRow(['2026-10-09','outbound','saved','']);h.ctx.initializeSheet_();

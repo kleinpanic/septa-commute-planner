@@ -13,7 +13,7 @@ test('free routing makes one ordinary request per road direction and shares walk
  h.ctx.refreshCommute();assert.equal(h.requests.filter(r=>r.maps).length,10);
 });
 test('outside the commute window only source calendars are checked; an active-day tick updates live trains',()=>{
- const h=host();h.ctx.setupCommute();const n=h.requests.length,old=clone(h.resources.get('options'));assert.equal(h.ctx.commuteTick().state,'idle');assert.deepEqual(h.resources.get('options'),old);assert.equal(h.requests.length,n+1);assert.ok(h.requests.at(-1).url.includes('/calendars/source/'));
+ const h=host();h.ctx.setupCommute();const n=h.requests.length,old=clone(h.resources.get('options'));assert.equal(h.ctx.commuteTick().state,'idle');assert.deepEqual(h.resources.get('options'),old);assert.equal(h.requests.length,n+1);assert.ok(h.requests.at(-1).url.includes('/calendars/source/'));assert.equal(h.status().maps_requests_in_run,0);assert.equal(h.status().septa_live_requests_in_run,0);
  h.setNow('2026-10-09T14:00:00Z');assert.equal(h.ctx.commuteTick().state,'healthy');assert.equal(h.status().septa_live_requests_in_run,4);assert.equal(h.status().maps_requests_in_run,5);
  h.setNow('2026-10-10T00:30:00Z');const count=h.requests.length;assert.equal(h.ctx.commuteTick().state,'idle');assert.equal(h.requests.length,count+1);
 });

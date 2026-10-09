@@ -236,6 +236,20 @@ function event_(o,c,main,owner) {
     extendedProperties:{private:{commuteOwner:owner,commuteKey:key}},colorId:o.chosen?'10':'8'};
   const digest=hash_(JSON.stringify(body));body.extendedProperties.private.commuteHash=digest;return body;
 }
+function conflictingInsert_(op,token) {
+  const response=UrlFetchApp.fetch(op.url+'/'+op.body.id,{method:'get',muteHttpExceptions:true,headers:{Authorization:'Bearer '+token}});
+  const code=response.getResponseCode();
+  if(code===200) {
+    let existing;try{existing=JSON.parse(response.getContentText());}catch(e){throw new Error('calendar_get_json_invalid');}
+    const expected=op.body.extendedProperties.private,actual=existing.extendedProperties&&existing.extendedProperties.private;
+    if(existing.status!=='cancelled'&&actual&&actual.commuteOwner===expected.commuteOwner&&actual.commuteKey===expected.commuteKey) {
+      if(actual.commuteHash===expected.commuteHash)return null;
+      const body={...op.body};delete body.id;return {url:op.url+'/'+op.body.id,method:'patch',body};
+    }
+  }else if(code!==404&&code!==410)throw new Error('calendar_get_http_'+code);
+  // Deleted Calendar IDs remain reserved. Use a fresh ID, then retain it by the logical ownership key.
+  return {...op,body:{...op.body,id:hash_(op.body.id+':'+Utilities.getUuid()).slice(0,40)}};
+}
 function calendarBatch_(operations,token) {
   let pending=operations;
   for(let attempt=0;pending.length;attempt++) {
@@ -245,6 +259,7 @@ function calendarBatch_(operations,token) {
     replies.forEach((r,j)=>{
       const code=r.getResponseCode(),op=pending[j];
       if((code>=200&&code<300)||(op.method==='delete'&&(code===404||code===410)))return;
+      if(code===409&&op.method==='post'&&attempt<3) {const next=conflictingInsert_(op,token);if(next)retry.push(next);return;}
       let reason='';try{reason=JSON.parse(r.getContentText()).error.errors[0].reason;}catch(e){}
       const throttled=code===403&&['rateLimitExceeded','userRateLimitExceeded'].includes(reason);
       if(attempt<3&&(throttled||[429,500,502,503,504].includes(code)))retry.push(op);
@@ -256,16 +271,18 @@ function calendarBatch_(operations,token) {
 }
 function reconcile_(id,desired,start,end,c,owner) {
   const existing=events_(id,start,end).filter(e=>e.extendedProperties&&e.extendedProperties.private&&e.extendedProperties.private.commuteOwner===owner);
-  const byId=Object.fromEntries(existing.map(e=>[e.id,e]));const desiredIds=new Set(desired.map(e=>e.id));
-  const deletes=existing.filter(e=>!desiredIds.has(e.id)&&new Date(e.start.dateTime).getTime()>Date.now());
+  const byKey=Object.fromEntries(existing.map(e=>[e.extendedProperties.private.commuteKey,e]));
+  if(Object.keys(byKey).length!==existing.length)throw new Error('calendar_duplicate_owned_key');
+  const desiredKeys=new Set(desired.map(e=>e.extendedProperties.private.commuteKey));
+  const deletes=existing.filter(e=>!desiredKeys.has(e.extendedProperties.private.commuteKey)&&new Date(e.start.dateTime).getTime()>Date.now());
   if(deletes.length>c.max_deletions_per_run)throw new Error('calendar_deletion_cap');
   const operations=[];
   desired.forEach(e=>{
-    const old=byId[e.id];if(old&&old.extendedProperties.private.commuteHash===e.extendedProperties.private.commuteHash)return;
+    const old=byKey[e.extendedProperties.private.commuteKey];if(old&&old.extendedProperties.private.commuteHash===e.extendedProperties.private.commuteHash)return;
     if(old&&new Date(old.start.dateTime).getTime()<Date.now())return;
     if(!old&&new Date(e.start.dateTime).getTime()<Date.now())return;
     const body={...e};if(old)delete body.id;
-    operations.push({url:'https://www.googleapis.com/calendar/v3/calendars/'+encodeURIComponent(id)+'/events'+(old?'/'+e.id:''),method:old?'patch':'post',body});
+    operations.push({url:'https://www.googleapis.com/calendar/v3/calendars/'+encodeURIComponent(id)+'/events'+(old?'/'+old.id:''),method:old?'patch':'post',body});
   });
   deletes.forEach(e=>operations.push({url:'https://www.googleapis.com/calendar/v3/calendars/'+encodeURIComponent(id)+'/events/'+e.id,method:'delete'}));
   const token=ScriptApp.getOAuthToken();
@@ -292,7 +309,8 @@ function publishSheets_(plans,full,refreshDate) {
 }
 function runCommute_(kind,force) {
   const lock=LockService.getScriptLock();if(!lock.tryLock(1000))return {state:'busy'};
-  const started=Date.now(),p=PropertiesService.getScriptProperties(),warnings=new Set();let stage='configuration';
+  const started=Date.now(),p=PropertiesService.getScriptProperties(),warnings=new Set();let stage='configuration',railRequests=0;
+  providerUsage_={maps:0,routes:0};
   try {
     const c=settings_();
     walkMemo_={};driveMemo_={};routesUnavailable_=false;providerUsage_={maps:0,routes:0};providerBudget_={maps:c.max_maps_requests_per_day,routes:c.max_routes_requests_per_day};
@@ -320,6 +338,7 @@ function runCommute_(kind,force) {
     const stations=stations_();stage='static_schedule';const feed=days.length?feed_(c,stations,started):{version:'No commute days',start:'',end:'',checked:new Date().toISOString()};
     if(days.some(d=>d.date.replace(/-/g,'')<feed.start||d.date.replace(/-/g,'')>feed.end))throw new Error('gtfs_window_outside_coverage');
     stage='live_rail';const live=days.some(d=>d.date===today&&started>=d.start-c.active_window_hours*3600000&&started<=d.end+c.active_window_hours*3600000)?live_(stations,c.target_stop_id,warnings):{trains:[],arrivals:{},observedAt:0,requests:0};
+    railRequests=live.requests;
     stage='google_routes_and_choices';const selections=selections_();
     const plans=days.map(d=>planDay_(d,c,stations,feed,live,started,warnings,selections));
     const owner='septa-commute:'+ScriptApp.getScriptId();
@@ -350,7 +369,7 @@ function runCommute_(kind,force) {
     try {
       const today=localDate_(new Date(started)),seconds=Math.max(0,Math.ceil((Date.now()-started)/1000));
       if(kind==='scheduled')p.setProperty('RUNTIME_'+today,String(Number(p.getProperty('RUNTIME_'+today)||0)+seconds));
-      status_({runtime_seconds:seconds,scheduled_runtime_seconds_today:Number(p.getProperty('RUNTIME_'+today)||0),maps_requests_today:Number(p.getProperty('USAGE_maps_'+today)||0),routes_requests_today:Number(p.getProperty('USAGE_routes_'+today)||0)});
+      status_({runtime_seconds:seconds,scheduled_runtime_seconds_today:Number(p.getProperty('RUNTIME_'+today)||0),maps_requests_today:Number(p.getProperty('USAGE_maps_'+today)||0),routes_requests_today:Number(p.getProperty('USAGE_routes_'+today)||0),maps_requests_in_run:providerUsage_.maps,routes_requests_in_run:providerUsage_.routes,septa_live_requests_in_run:railRequests});
       const cutoff=CommuteCore.addDays(today,-7);
       Object.keys(p.getProperties()).forEach(k=>{const match=/^(?:USAGE_(?:maps|routes)_|RUNTIME_|OUTBOUND_LEAVE_|OUTBOUND_)(\d{4}-\d{2}-\d{2})$/.exec(k);if(match&&match[1]<cutoff)p.deleteProperty(k);});
     }finally{lock.releaseLock();}

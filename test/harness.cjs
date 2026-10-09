@@ -22,7 +22,7 @@ function tables(){
 function harness(options={}){
  let now=Date.parse(options.now || '2026-10-09T12:00:00Z');
  class Clock extends Date {constructor(...a){super(...(a.length?a:[now]));}static now(){return now;}}
- const sheets=new Map(),properties=new Map(),triggers=[],createdCalendars=[],writes=[],requests=[],logs=[],sleeps=[];
+ const sheets=new Map(),properties=new Map(),triggers=[],createdCalendars=[],writes=[],requests=[],logs=[],sleeps=[],tombstones=new Map();
  const resources=new Map([['source',[
   {id:'lecture',summary:'Lecture',location:'Campus hall',start:{dateTime:'2026-10-09T13:20:00-04:00'},end:{dateTime:'2026-10-09T15:50:00-04:00'}},
   {id:'deadline',summary:'Deadline',start:{dateTime:'2026-10-09T17:00:00-04:00'},end:{dateTime:'2026-10-09T17:30:00-04:00'}}
@@ -53,14 +53,15 @@ function harness(options={}){
   if(failures.has(id))return response(failures.get(id),{});
   if(!resources.has(id))return response(404,{});
   if(!opt.method||opt.method==='get'){
+   if(eventId){const row=resources.get(id).find(e=>e.id===eventId)||tombstones.get(id+':'+eventId);return response(row?200:404,row||{});}
    if(pages){const i=Number(u.searchParams.get('pageToken')||0);return response(200,pages[i] || {});}
    const lo=Date.parse(u.searchParams.get('timeMin')),hi=Date.parse(u.searchParams.get('timeMax'));
    return response(200,{items:clone(resources.get(id).filter(e=>Date.parse(e.end?.dateTime)>lo&&Date.parse(e.start?.dateTime)<hi))});
   }
   const events=resources.get(id),body=opt.payload?JSON.parse(opt.payload):null,index=events.findIndex(e=>e.id===eventId);
-  if(opt.method==='post'){if(events.some(e=>e.id===body.id))return response(409,{});events.push(clone(body));}
+  if(opt.method==='post'){if(events.some(e=>e.id===body.id)||tombstones.has(id+':'+body.id))return response(409,{});events.push(clone(body));}
   else if(opt.method==='patch'){if(index<0)return response(404,{});events[index]={...events[index],...clone(body)};}
-  else if(opt.method==='delete'){if(index<0)return response(404,{});events.splice(index,1);}
+  else if(opt.method==='delete'){if(index<0)return response(404,{});tombstones.set(id+':'+eventId,{id:eventId,status:'cancelled'});events.splice(index,1);}
   else throw new Error('mock_method_unknown');writes.push({id,method:opt.method,eventId,body});return response(opt.method==='delete'?204:200,body || {});
  }
  function fmt(d,tz,pattern){
@@ -84,7 +85,7 @@ function harness(options={}){
   ScriptApp:{getScriptId:()=> 'fixture-script',getOAuthToken:()=> 'fixture-token',getProjectTriggers:()=>triggers.slice(),deleteTrigger:t=>triggers.splice(triggers.indexOf(t),1),newTrigger(handler){const t={getHandlerFunction:()=>handler};return {timeBased(){return this;},everyMinutes(n){t.minutes=n;return this;},everyHours(n){t.hours=n;return this;},create(){triggers.push(t);return t;}};}},
   LockService:{getScriptLock:()=>({tryLock:()=>{if(busy||locked)return false;locked=true;return true;},releaseLock:()=>{locked=false;}})},
   UrlFetchApp:{fetch,fetchAll:ops=>ops.map(o=>fetch(o.url,o))},
-  Utilities:{sleep:n=>sleeps.push(n),formatDate:fmt,parseDate,parseCsv:JSON.parse,unzip:b=>b.kind==='outer'?[{kind:'rail',getName:()=> 'google_rail.zip'}]:archive(),computeDigest:(alg,s)=>[...crypto.createHash('sha256').update(s).digest()],DigestAlgorithm:{SHA_256:'sha256'},Charset:{UTF_8:'UTF-8'}},
+  Utilities:{sleep:n=>sleeps.push(n),getUuid:()=>crypto.randomUUID(),formatDate:fmt,parseDate,parseCsv:JSON.parse,unzip:b=>b.kind==='outer'?[{kind:'rail',getName:()=> 'google_rail.zip'}]:archive(),computeDigest:(alg,s)=>[...crypto.createHash('sha256').update(s).digest()],DigestAlgorithm:{SHA_256:'sha256'},Charset:{UTF_8:'UTF-8'}},
   Maps:{DirectionFinder:{Mode:{WALKING:'WALKING',DRIVING:'DRIVING'}},newDirectionFinder(){const q={};return {setOrigin(v){q.origin=v;return this;},setDestination(v){q.destination=v;return this;},setMode(v){q.mode=v;return this;},setDepart(v){q.depart=v;return this;},getDirections(){requests.push({maps:clone(q)});if(failures.has('maps'))throw new Error('maps_unavailable');if(mapReply)return clone(mapReply);return {routes:[{legs:[{duration:{value:q.mode==='WALKING'?600:1200},distance:{value:q.mode==='WALKING'?700:16093.44}}]}]};}};},newGeocoder:()=>({geocode:t=>failures.has('geocode')?{status:'ZERO_RESULTS'}:{status:'OK',results:[{formatted_address:'Fixture address',geometry:{location:{lat:40,lng:-75}}}]}})}
  };
  const ctx=vm.createContext(sandbox);
@@ -98,7 +99,7 @@ function harness(options={}){
   ctx.initializeSheet_();Object.entries({origin:'Fixture origin',source_calendar_ids:'source',main_calendar_id:'main',options_calendar_id:'options',target_stop_id:'C',planning_days:1,...overrides}).forEach(([k,v])=>ctx.setting_(k,v));
   ctx.table_('Stations',[['Enabled','Stop ID','Station','Fallback drive minutes'],[true,'A','Station A',30],[true,'B','Station B',40]]);
  }
- return {ctx,sheets,properties,triggers,createdCalendars,resources,failures,responses,writes,requests,logs,menus,sleeps,configure,
+ return {ctx,sheets,properties,triggers,createdCalendars,resources,failures,responses,writes,requests,logs,menus,sleeps,tombstones,configure,
   setFeed:v=>{raw=v;},setMaps:v=>{mapReply=v;},
   setNow:v=>{now=Date.parse(v);},setBusy:v=>{busy=v;},locked:()=>locked,setPages:v=>{pages=v;},setPrompt:v=>{prompt=v;},status:()=>Object.fromEntries((sheets.get('Status')?.rows || []).slice(1))};
 }
